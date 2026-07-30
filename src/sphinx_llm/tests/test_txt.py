@@ -17,6 +17,7 @@ import pytest
 from sphinx.application import Sphinx
 from sphinx.errors import ExtensionError
 
+from sphinx_llm.markdown_builder import output_path_for_docname
 from sphinx_llm.txt import MarkdownGenerator
 
 
@@ -56,6 +57,23 @@ def assert_file_exists_with_content(path: Path) -> None:
     """Assert a file exists and is non-empty."""
     assert path.exists(), f"File not found: {path}"
     assert path.stat().st_size > 0, f"File is empty: {path}"
+
+
+@pytest.mark.parametrize(
+    ("layout", "docname", "expected"),
+    [
+        ("standard", "guide/page", "guide/page.md"),
+        ("html-file-suffix", "guide/page", "guide/page.html.md"),
+        ("dirhtml-file-suffix", "guide/page", "guide/page/index.html.md"),
+        ("dirhtml-file-suffix", "guide/index", "guide/index.html.md"),
+        ("dirhtml-url-suffix", "guide/page", "guide/page.md"),
+        ("dirhtml-url-suffix", "guide/index", "guide.md"),
+        ("dirhtml-replace", "guide/page", "guide/page/index.md"),
+        ("dirhtml-replace", "guide/index", "guide/index.md"),
+    ],
+)
+def test_output_path_for_docname(layout: str, docname: str, expected: str):
+    assert output_path_for_docname(docname, layout) == expected
 
 
 def get_non_index_rst_files(source_dir: Path) -> list[Path]:
@@ -259,12 +277,6 @@ def test_dirhtml_suffix_mode_configuration(sphinx_build_with_suffix_mode_config)
         elif effective_mode == "auto":
             assert_file_exists_with_content(file_suffix_md)
             assert_file_exists_with_content(url_suffix_md)
-            # Verify content is the same (they should be copies)
-            assert file_suffix_md.read_text(
-                encoding="utf-8"
-            ) == url_suffix_md.read_text(encoding="utf-8"), (
-                f"Content mismatch between {file_suffix_md} and {url_suffix_md}"
-            )
 
     # Root index should always be generated regardless of suffix mode
     index_file_suffix_md = build_dir / "index.html.md"
@@ -283,6 +295,91 @@ def test_dirhtml_suffix_mode_configuration(sphinx_build_with_suffix_mode_config)
     elif effective_mode == "auto":
         assert_file_exists_with_content(index_file_suffix_md)
         assert_file_exists_with_content(index_url_suffix_md)
+
+
+def test_dirhtml_links_match_published_locations(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    output_dir = tmp_path / "output"
+    guide_dir = source_dir / "guide"
+    guide_dir.mkdir(parents=True)
+
+    (source_dir / "conf.py").write_text(
+        "\n".join(
+            [
+                'extensions = ["sphinx_llm.txt"]',
+                'project = "Link test"',
+                'root_doc = "index"',
+                "llms_txt_build_parallel = False",
+                'llms_txt_suffix_mode = "auto"',
+                "markdown_anchor_sections = True",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (source_dir / "index.rst").write_text(
+        "\n".join(
+            [
+                "Index",
+                "=====",
+                "",
+                ".. toctree::",
+                "",
+                "   guide/page",
+                "   guide/target",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (guide_dir / "page.rst").write_text(
+        "\n".join(
+            [
+                "Page",
+                "====",
+                "",
+                "See :doc:`Target <target>`.",
+                "",
+                ".. _page-details:",
+                "",
+                "Details",
+                "-------",
+                "",
+                "See :ref:`Details <page-details>`.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (guide_dir / "target.rst").write_text(
+        "Target\n======\n",
+        encoding="utf-8",
+    )
+
+    app = Sphinx(
+        srcdir=str(source_dir),
+        confdir=str(source_dir),
+        outdir=str(output_dir),
+        doctreedir=str(tmp_path / "doctrees"),
+        buildername="dirhtml",
+        warningiserror=False,
+        freshenv=True,
+    )
+    app.build()
+
+    file_suffix_page = (output_dir / "guide/page/index.html.md").read_text(
+        encoding="utf-8"
+    )
+    url_suffix_page = (output_dir / "guide/page.md").read_text(encoding="utf-8")
+    llms_full = (output_dir / "llms-full.txt").read_text(encoding="utf-8")
+
+    assert "[Target](../target/index.html.md)" in file_suffix_page
+    assert "[Details](#page-details)" in file_suffix_page
+    assert "[Target](target.md)" in url_suffix_page
+    assert "[Details](#page-details)" in url_suffix_page
+    assert "# guide/page/index.html.md" in llms_full
+    assert "[Target](guide/target/index.html.md)" in llms_full
+    assert "[Details](guide/page/index.html.md#page-details)" in llms_full
 
 
 @pytest.mark.parametrize(
